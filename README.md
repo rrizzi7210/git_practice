@@ -125,6 +125,35 @@ It covers auth (API key and username/password), CSRF capture/rotation and
 stale-token re-login, request/response parsing, error handling, each
 high-level operation's request payload, and the CLI wiring.
 
+## Live smoke test (against a real, non-production UDM)
+
+`test_unifi_udm.py` never touches the network. To validate against an actual
+console, use `live_smoke_test.py`. **Run it from a machine on the same LAN as
+the UDM** — a cloud/CI runner cannot reach a private LAN address.
+
+```bash
+export UNIFI_HOST=192.168.1.1
+
+# Read-only (safe): lists sites, devices and networks.
+export UNIFI_API_KEY=your-key
+python live_smoke_test.py
+
+# Write test (opt-in): creates a throwaway VLAN, verifies it, deletes it.
+# Needs a local account, not an API key.
+export UNIFI_USERNAME=admin
+export UNIFI_PASSWORD=your-password
+python live_smoke_test.py --write
+```
+
+Safety:
+
+- Read-only unless you pass `--write`.
+- The write test creates VLAN id `4094` / `10.254.254.1/24` by default (change
+  with `--vlan-id` / `--subnet` / `--name`), confirms it, then **deletes it** —
+  cleanup runs even if verification fails. Pass `--keep` to leave it in place.
+- It refuses to run if a network of the same name or VLAN id already exists.
+- **Never point `--write` at a production console.**
+
 ## Notes
 
 - The Integration API is the supported, stable interface. The classic
