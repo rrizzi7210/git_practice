@@ -77,6 +77,12 @@ python unifi_udm.py port-forwards
 python unifi_udm.py set-wlan "Guest WiFi" off
 python unifi_udm.py set-wlan-password "My WiFi" 'new-super-secret'
 python unifi_udm.py restart-device aa:bb:cc:dd:ee:ff
+
+# Create a routed VLAN (DHCP pool auto-derived from the /24)
+python unifi_udm.py create-vlan IoT 30 192.168.30.1/24
+python unifi_udm.py create-vlan Guest 40 10.10.40.1/24 \
+    --dhcp-start 10.10.40.100 --dhcp-stop 10.10.40.200
+python unifi_udm.py create-vlan Servers 50 172.16.50.1/24 --no-dhcp
 ```
 
 ## Library usage
@@ -101,6 +107,9 @@ with UDMClient(host="192.168.1.1", username="admin", password="secret") as udm:
         dst_port=80,
         proto="tcp",
     )
+
+    # Create a routed VLAN (VLAN 30, gateway .1, DHCP on)
+    udm.create_vlan(name="IoT", vlan_id=30, subnet="192.168.30.1/24")
 ```
 
 ## Testing

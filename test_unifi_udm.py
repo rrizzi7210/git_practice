@@ -356,6 +356,125 @@ class OperationTests(unittest.TestCase):
         self.assertEqual(client._network("/stat/device"), "/proxy/network/api/s/office/stat/device")
 
 
+class VlanTests(unittest.TestCase):
+    def _client(self) -> Tuple[UDMClient, FakeSession]:
+        client, fake = make_client(api_key=None, username="u", password="p")
+        client._logged_in = True
+        return client, fake
+
+    def test_create_vlan_payload_with_derived_dhcp(self) -> None:
+        client, fake = self._client()
+        fake.route(
+            "POST", "/rest/networkconf", FakeResponse(200, {"data": [{"_id": "N1"}]})
+        )
+        result = client.create_vlan(
+            name="IoT", vlan_id=30, subnet="192.168.30.1/24"
+        )
+        self.assertEqual(result["_id"], "N1")
+        call = [c for c in fake.calls if c["method"] == "POST"][-1]
+        self.assertTrue(call["url"].endswith("/proxy/network/api/s/default/rest/networkconf"))
+        body = call["json"]
+        self.assertEqual(body["name"], "IoT")
+        self.assertEqual(body["purpose"], "corporate")
+        self.assertTrue(body["vlan_enabled"])
+        self.assertEqual(body["vlan"], 30)  # int, not str
+        self.assertEqual(body["ip_subnet"], "192.168.30.1/24")
+        self.assertTrue(body["enabled"])
+        self.assertTrue(body["dhcpd_enabled"])
+        # DHCP pool derived from the /24 base.
+        self.assertEqual(body["dhcpd_start"], "192.168.30.6")
+        self.assertEqual(body["dhcpd_stop"], "192.168.30.254")
+
+    def test_create_vlan_explicit_dhcp_range(self) -> None:
+        client, fake = self._client()
+        fake.route("POST", "/rest/networkconf", FakeResponse(200, {"data": [{"_id": "N2"}]}))
+        client.create_vlan(
+            name="Guest",
+            vlan_id=40,
+            subnet="10.10.40.1/24",
+            dhcp_start="10.10.40.100",
+            dhcp_stop="10.10.40.200",
+        )
+        body = [c for c in fake.calls if c["method"] == "POST"][-1]["json"]
+        self.assertEqual(body["dhcpd_start"], "10.10.40.100")
+        self.assertEqual(body["dhcpd_stop"], "10.10.40.200")
+
+    def test_create_vlan_dhcp_disabled_omits_pool(self) -> None:
+        client, fake = self._client()
+        fake.route("POST", "/rest/networkconf", FakeResponse(200, {"data": [{"_id": "N3"}]}))
+        client.create_vlan(
+            name="NoDHCP", vlan_id=50, subnet="172.16.50.1/24", dhcp_enabled=False
+        )
+        body = [c for c in fake.calls if c["method"] == "POST"][-1]["json"]
+        self.assertFalse(body["dhcpd_enabled"])
+        self.assertNotIn("dhcpd_start", body)
+        self.assertNotIn("dhcpd_stop", body)
+
+    def test_create_vlan_rejects_out_of_range_id(self) -> None:
+        client, _ = self._client()
+        for bad in (0, 4095, -1):
+            with self.assertRaises(ValueError):
+                client.create_vlan(name="X", vlan_id=bad, subnet="192.168.1.1/24")
+
+    def test_create_vlan_requires_cidr_subnet(self) -> None:
+        client, _ = self._client()
+        with self.assertRaises(ValueError):
+            client.create_vlan(name="X", vlan_id=30, subnet="192.168.30.1")
+
+    def test_create_vlan_is_mutating_sends_csrf(self) -> None:
+        client, fake = self._client()
+        client._csrf_token = "csrf-1"
+        fake.route("POST", "/rest/networkconf", FakeResponse(200, {"data": [{"_id": "N4"}]}))
+        client.create_vlan(name="Sec", vlan_id=99, subnet="192.168.99.1/24")
+        call = [c for c in fake.calls if c["method"] == "POST"][-1]
+        self.assertEqual(call["headers"]["X-CSRF-Token"], "csrf-1")
+
+    def test_get_network_by_name(self) -> None:
+        client, fake = self._client()
+        fake.route(
+            "GET",
+            "/rest/networkconf",
+            FakeResponse(200, {"data": [{"_id": "N1", "name": "LAN"}, {"_id": "N2", "name": "IoT"}]}),
+        )
+        self.assertEqual(client.get_network("IoT")["_id"], "N2")
+
+    def test_delete_network(self) -> None:
+        client, fake = self._client()
+        fake.route("DELETE", "/rest/networkconf/N1", FakeResponse(200, json_data=None))
+        self.assertIsNone(client.delete_network("N1"))
+        call = fake.calls[-1]
+        self.assertEqual(call["method"], "DELETE")
+        self.assertTrue(call["url"].endswith("/rest/networkconf/N1"))
+
+    def test_create_network_raw_payload(self) -> None:
+        client, fake = self._client()
+        fake.route("POST", "/rest/networkconf", FakeResponse(200, {"data": [{"_id": "N9"}]}))
+        payload = {"name": "Raw", "purpose": "vlan-only", "vlan_enabled": True, "vlan": 7}
+        result = client.create_network(payload)
+        self.assertEqual(result["_id"], "N9")
+        self.assertEqual([c for c in fake.calls if c["method"] == "POST"][-1]["json"], payload)
+
+    def test_cli_create_vlan_dispatch(self) -> None:
+        args = unifi_udm.build_parser().parse_args(
+            ["--host", "udm.test", "--api-key", "k", "create-vlan", "IoT", "30", "192.168.30.1/24", "--no-dhcp"]
+        )
+        fake_client = mock.MagicMock()
+        fake_client.__enter__ = mock.MagicMock(return_value=fake_client)
+        fake_client.__exit__ = mock.MagicMock(return_value=False)
+        fake_client.create_vlan.return_value = {"_id": "N1"}
+        with mock.patch.object(unifi_udm, "_client_from_args", return_value=fake_client):
+            with contextlib.redirect_stdout(io.StringIO()):
+                unifi_udm.run_command(args)
+        fake_client.create_vlan.assert_called_once_with(
+            name="IoT",
+            vlan_id=30,
+            subnet="192.168.30.1/24",
+            dhcp_enabled=False,
+            dhcp_start=None,
+            dhcp_stop=None,
+        )
+
+
 class ContextManagerTests(unittest.TestCase):
     def test_context_manager_logs_in_and_out(self) -> None:
         client, fake = make_client(api_key=None, username="u", password="p")

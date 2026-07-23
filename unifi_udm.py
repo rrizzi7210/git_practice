@@ -319,6 +319,87 @@ class UDMClient:
         data = self._request("GET", self._network("/rest/networkconf"))
         return data.get("data", []) if isinstance(data, dict) else data
 
+    def get_network(self, name: str) -> Optional[Dict[str, Any]]:
+        """Find a network configuration by its name."""
+        for net in self.list_networks():
+            if net.get("name") == name:
+                return net
+        return None
+
+    def create_network(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a network with a raw settings payload.
+
+        Prefer :meth:`create_vlan` for the common corporate-VLAN case; use
+        this when you need full control over the ``networkconf`` fields.
+        """
+        data = self._request(
+            "POST", self._network("/rest/networkconf"), json_body=settings
+        )
+        items = data.get("data", []) if isinstance(data, dict) else data
+        return items[0] if items else {}
+
+    def create_vlan(
+        self,
+        name: str,
+        vlan_id: int,
+        subnet: str,
+        dhcp_enabled: bool = True,
+        dhcp_start: Optional[str] = None,
+        dhcp_stop: Optional[str] = None,
+        purpose: str = "corporate",
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        """Create a routed VLAN network on the UDM gateway.
+
+        Parameters
+        ----------
+        name:
+            Display name for the network.
+        vlan_id:
+            802.1Q VLAN id (1-4094).
+        subnet:
+            Gateway address in CIDR form, e.g. ``192.168.30.1/24``. This is
+            the router's IP on the VLAN, not the network address.
+        dhcp_enabled:
+            Whether to run a DHCP server on the VLAN.
+        dhcp_start, dhcp_stop:
+            DHCP pool bounds. If omitted while DHCP is enabled they are
+            derived from ``subnet`` (``.6`` .. ``.254`` of the /24).
+        purpose:
+            Network purpose; ``corporate`` for a normal routed VLAN.
+        enabled:
+            Whether the network is active.
+        """
+        if not 1 <= int(vlan_id) <= 4094:
+            raise ValueError("vlan_id must be between 1 and 4094")
+        if "/" not in subnet:
+            raise ValueError("subnet must be in CIDR form, e.g. 192.168.30.1/24")
+
+        settings: Dict[str, Any] = {
+            "name": name,
+            "purpose": purpose,
+            "vlan_enabled": True,
+            "vlan": int(vlan_id),
+            "ip_subnet": subnet,
+            "enabled": enabled,
+            "dhcpd_enabled": dhcp_enabled,
+        }
+
+        if dhcp_enabled:
+            if dhcp_start and dhcp_stop:
+                settings["dhcpd_start"] = dhcp_start
+                settings["dhcpd_stop"] = dhcp_stop
+            else:
+                base = subnet.split("/")[0].rsplit(".", 1)[0]
+                settings["dhcpd_start"] = dhcp_start or f"{base}.6"
+                settings["dhcpd_stop"] = dhcp_stop or f"{base}.254"
+
+        return self.create_network(settings)
+
+    def delete_network(self, network_id: str) -> None:
+        """Delete a network (VLAN) by its ``_id``."""
+        self._request("DELETE", self._network(f"/rest/networkconf/{network_id}"))
+
     def list_port_forwards(self) -> List[Dict[str, Any]]:
         """List port forwarding rules on the gateway."""
         data = self._request("GET", self._network("/rest/portforward"))
@@ -458,6 +539,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_restart = sub.add_parser("restart-device", help="Restart a device by MAC")
     p_restart.add_argument("mac", help="Device MAC address")
 
+    p_vlan = sub.add_parser("create-vlan", help="Create a routed VLAN network")
+    p_vlan.add_argument("name", help="Network display name")
+    p_vlan.add_argument("vlan_id", type=int, help="VLAN id (1-4094)")
+    p_vlan.add_argument(
+        "subnet", help="Gateway IP in CIDR form, e.g. 192.168.30.1/24"
+    )
+    p_vlan.add_argument(
+        "--no-dhcp", action="store_true", help="Do not run a DHCP server"
+    )
+    p_vlan.add_argument("--dhcp-start", help="DHCP pool start address")
+    p_vlan.add_argument("--dhcp-stop", help="DHCP pool end address")
+
     return parser
 
 
@@ -487,6 +580,17 @@ def run_command(args: argparse.Namespace) -> None:
             _print(client.set_wlan_password(args.name, args.passphrase))
         elif args.command == "restart-device":
             _print(client.restart_device(args.mac))
+        elif args.command == "create-vlan":
+            _print(
+                client.create_vlan(
+                    name=args.name,
+                    vlan_id=args.vlan_id,
+                    subnet=args.subnet,
+                    dhcp_enabled=not args.no_dhcp,
+                    dhcp_start=args.dhcp_start,
+                    dhcp_stop=args.dhcp_stop,
+                )
+            )
         else:  # pragma: no cover - argparse enforces choices
             raise SystemExit(f"Unknown command: {args.command}")
 
