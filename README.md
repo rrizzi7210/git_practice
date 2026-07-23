@@ -103,6 +103,19 @@ with UDMClient(host="192.168.1.1", username="admin", password="secret") as udm:
     )
 ```
 
+## Testing
+
+The test suite mocks the HTTP layer entirely — no network or real console is
+needed:
+
+```bash
+python -m unittest test_unifi_udm -v
+```
+
+It covers auth (API key and username/password), CSRF capture/rotation and
+stale-token re-login, request/response parsing, error handling, each
+high-level operation's request payload, and the CLI wiring.
+
 ## Notes
 
 - The Integration API is the supported, stable interface. The classic
